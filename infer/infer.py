@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument('--maxlen', default=101, type=int)
 
     # Baseline Model construction
-    parser.add_argument('--hidden_units', default=32, type=int)
+    parser.add_argument('--hidden_units', default=64, type=int)
     parser.add_argument('--num_blocks', default=1, type=int)
     parser.add_argument('--num_epochs', default=3, type=int)
     parser.add_argument('--num_heads', default=1, type=int)

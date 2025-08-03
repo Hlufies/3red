@@ -18,12 +18,12 @@ def get_args():
     parser = argparse.ArgumentParser()
 
     # Train params
-    parser.add_argument('--batch_size', default=32, type=int)
+    parser.add_argument('--batch_size', default=1024, type=int)
     parser.add_argument('--lr', default=0.001, type=float)
     parser.add_argument('--maxlen', default=101, type=int)
 
     # Baseline Model construction
-    parser.add_argument('--hidden_units', default=1024, type=int)
+    parser.add_argument('--hidden_units', default=64, type=int)
     parser.add_argument('--num_blocks', default=1, type=int)
     parser.add_argument('--num_epochs', default=3, type=int)
     parser.add_argument('--num_heads', default=1, type=int)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
             neg = neg.to(args.device)
             next_token_type = next_token_type.to(args.device)
             next_action_type = next_action_type.to(args.device)
-            
+
             pos_logits, neg_logits, pos_pred, user_indices = model(
                 seq, pos, neg, token_type, next_token_type, next_action_type, seq_feat, pos_feat, neg_feat
             )
@@ -134,6 +134,7 @@ if __name__ == '__main__':
             # aux loss
             next_action_type = next_action_type[user_indices[:, 0]].unsqueeze(-1)
             next_token_type = next_token_type[user_indices[:, 0]]
+
             pos_indices = torch.nonzero((next_token_type == 1))
 
             pos_pred = pos_pred[pos_indices[:, 0], pos_indices[:, 1]]

@@ -1,7 +1,9 @@
 from pathlib import Path
-
+import sys
+sys.stdout.flush()
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -104,7 +106,6 @@ class BaselineModel(torch.nn.Module):
 
     def __init__(self, user_num, item_num, feat_statistics, feat_types, args):  #
         super(BaselineModel, self).__init__()
-
         self.user_num = user_num
         self.item_num = item_num
         self.dev = args.device
@@ -124,7 +125,7 @@ class BaselineModel(torch.nn.Module):
         self.attention_layers = torch.nn.ModuleList()
         self.forward_layernorms = torch.nn.ModuleList()
         self.forward_layers = torch.nn.ModuleList()
-
+        self.feat_types = feat_types
         self._init_feat_info(feat_statistics, feat_types)
 
         userdim = args.hidden_units * (len(self.USER_SPARSE_FEAT) + 1 + len(self.USER_ARRAY_FEAT)) + len(
@@ -167,6 +168,31 @@ class BaselineModel(torch.nn.Module):
         for k in self.ITEM_EMB_FEAT:
             self.emb_transform[k] = torch.nn.Linear(self.ITEM_EMB_FEAT[k], args.hidden_units)
 
+        # 将最后一个PReLU替换为Tanh（限制输出范围）
+        self.PredHeadProject = nn.Sequential(
+            nn.Linear(192, 96),
+            nn.BatchNorm1d(96),
+            nn.PReLU(),
+            nn.Dropout(0.3),
+            
+            nn.Linear(96, 32),
+            nn.BatchNorm1d(32),
+            nn.Tanh(),  # 使用Tanh限制输出范围
+            nn.Dropout(0.3),
+            
+            nn.Linear(32, 1)
+        )
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if m.out_features == 1:  # 输出层
+                    nn.init.xavier_normal_(m.weight, gain=0.1)
+                    nn.init.constant_(m.bias, -2.0)  # 负偏置
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                    nn.init.constant_(m.bias, 0.01)  # 小正偏置
     def _init_feat_info(self, feat_statistics, feat_types):
         """
         将特征统计信息（特征数量）按特征类型分组产生不同的字典，方便声明稀疏特征的Embedding Table
@@ -181,8 +207,8 @@ class BaselineModel(torch.nn.Module):
         self.ITEM_CONTINUAL_FEAT = feat_types['item_continual']
         self.USER_ARRAY_FEAT = {k: feat_statistics[k] for k in feat_types['user_array']}
         self.ITEM_ARRAY_FEAT = {k: feat_statistics[k] for k in feat_types['item_array']}
-        EMB_SHAPE_DICT = {"81": 32, "82": 1024, "83": 3584, "84": 4096, "85": 3584, "86": 3584}
-        self.ITEM_EMB_FEAT = {k: EMB_SHAPE_DICT[k] for k in feat_types['item_emb']}  # 记录的是不同多模态特征的维度
+        self.EMB_SHAPE_DICT = {"81": 32, "82": 1024, "83": 3584, "84": 4096, "85": 3584, "86": 1024}
+        self.ITEM_EMB_FEAT = {k: self.EMB_SHAPE_DICT[k] for k in feat_types['item_emb']}  # 记录的是不同多模态特征的维度
 
     def feat2tensor(self, seq_feature, k):
         """
@@ -271,23 +297,24 @@ class BaselineModel(torch.nn.Module):
 
             for k in feat_dict:
                 tensor_feature = self.feat2tensor(feature_array, k)
-
                 if feat_type.endswith('sparse'):
                     feat_list.append(self.sparse_emb[k](tensor_feature))
                 elif feat_type.endswith('array'):
                     feat_list.append(self.sparse_emb[k](tensor_feature).sum(2))
                 elif feat_type.endswith('continual'):
                     feat_list.append(tensor_feature.unsqueeze(2))
-
-        for k in self.ITEM_EMB_FEAT:
+        
+        self.ITEM_EMB_FEAT = {k: self.EMB_SHAPE_DICT[k] for k in self.feat_types['item_emb']}
+        for k, v in self.ITEM_EMB_FEAT.items():
             # collect all data to numpy, then batch-convert
             batch_size = len(feature_array)
-            emb_dim = self.ITEM_EMB_FEAT[k]
+            emb_dim = v
             seq_len = len(feature_array[0])
 
             # pre-allocate tensor
             batch_emb_data = np.zeros((batch_size, seq_len, emb_dim), dtype=np.float32)
-
+            
+            
             for i, seq in enumerate(feature_array):
                 for j, item in enumerate(seq):
                     if k in item:
@@ -321,6 +348,8 @@ class BaselineModel(torch.nn.Module):
         batch_size = log_seqs.shape[0]
         maxlen = log_seqs.shape[1]
         seqs = self.feat2emb(log_seqs, seq_feature, mask=mask, include_user=True)
+        res_seqs = seqs.clone()
+        
         seqs *= self.item_emb.embedding_dim**0.5
         poss = torch.arange(1, maxlen + 1, device=self.dev).unsqueeze(0).expand(batch_size, -1).clone()
         poss *= log_seqs != 0
@@ -345,8 +374,7 @@ class BaselineModel(torch.nn.Module):
                 seqs = self.forward_layernorms[i](seqs + self.forward_layers[i](seqs))
 
         log_feats = self.last_layernorm(seqs)
-
-        return log_feats
+        return log_feats, res_seqs
 
     def forward(
         self, user_item, pos_seqs, neg_seqs, mask, next_mask, next_action_type, seq_feature, pos_feature, neg_feature
@@ -369,18 +397,32 @@ class BaselineModel(torch.nn.Module):
             pos_logits: 正样本logits，形状为 [batch_size, maxlen]
             neg_logits: 负样本logits，形状为 [batch_size, maxlen]
         """
-        log_feats = self.log2feats(user_item, mask, seq_feature)
+        
+        log_feats, res_feats = self.log2feats(user_item, mask, seq_feature)
         loss_mask = (next_mask == 1).to(self.dev)
-
         pos_embs = self.feat2emb(pos_seqs, pos_feature, include_user=False)
         neg_embs = self.feat2emb(neg_seqs, neg_feature, include_user=False)
+        
+        user_indices = torch.nonzero((mask == 2))
+        user_ori_embs = res_feats[user_indices[:, 0], user_indices[:, 1]]
+        user_ori_embs = user_ori_embs.unsqueeze(1).repeat(1, pos_embs.size(1), 1)
+        user_att_embs = log_feats[user_indices[:, 0], user_indices[:, 1]]
+        user_att_embs = user_att_embs.unsqueeze(1).repeat(1, pos_embs.size(1), 1)
 
+        # if user_indices.shape[0] != pos_embs.shape[0]:
+        #     err_indices = torch.arange(pos_embs.size(0)) - user_indices[0]
+        
+        share_user_pos_embs = torch.cat([user_ori_embs, user_att_embs, pos_embs[user_indices[:, 0]]], dim=-1)
+        pos_pred = self.PredHeadProject(share_user_pos_embs.flatten(0, 1))
+        pos_pred = pos_pred.unflatten(0, (user_ori_embs.size(0), user_ori_embs.size(1)))
+        
         pos_logits = (log_feats * pos_embs).sum(dim=-1)
         neg_logits = (log_feats * neg_embs).sum(dim=-1)
         pos_logits = pos_logits * loss_mask
         neg_logits = neg_logits * loss_mask
 
-        return pos_logits, neg_logits
+        return pos_logits, neg_logits, pos_pred, user_indices
+
 
     def predict(self, log_seqs, seq_feature, mask):
         """
@@ -392,11 +434,14 @@ class BaselineModel(torch.nn.Module):
         Returns:
             final_feat: 用户序列的表征，形状为 [batch_size, hidden_units]
         """
-        log_feats = self.log2feats(log_seqs, mask, seq_feature)
+        log_feats, res_feats = self.log2feats(log_seqs, mask, seq_feature)
 
         final_feat = log_feats[:, -1, :]
 
-        return final_feat
+        user_indices = torch.nonzero((mask == 2))
+        user_ori_embs = res_feats[user_indices[:, 0], user_indices[:, 1]]
+        user_att_embs = log_feats[user_indices[:, 0], user_indices[:, 1]]
+        return final_feat, user_ori_embs, user_att_embs
 
     def save_item_emb(self, item_ids, retrieval_ids, feat_dict, save_path, batch_size=1024):
         """
