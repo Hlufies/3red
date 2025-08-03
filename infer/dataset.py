@@ -53,6 +53,8 @@ class MyDataset(torch.utils.data.Dataset):
         self.indexer = indexer
 
         self.feature_default_value, self.feature_types, self.feat_statistics = self._init_feat_info()
+        self.SHAPE_DICT = {"81": 32, "82": 1024, "83": 3584, "84": 4096, "85": 3584, "86": 1024}
+        self.mm_emb_shape_dict = {k: self.SHAPE_DICT[k] for k in self.mm_emb_ids}
 
     def _load_data_and_offsets(self):
         """
@@ -121,6 +123,7 @@ class MyDataset(torch.utils.data.Dataset):
             if i and item_feat:
                 ext_user_sequence.append((i, item_feat, 1, action_type))
 
+            
         seq = np.zeros([self.maxlen + 1], dtype=np.int32)
         pos = np.zeros([self.maxlen + 1], dtype=np.int32)
         neg = np.zeros([self.maxlen + 1], dtype=np.int32)
@@ -162,11 +165,13 @@ class MyDataset(torch.utils.data.Dataset):
             idx -= 1
             if idx == -1:
                 break
+        if (token_type[0] == 0 or token_type[0] == 2 or ext_user_sequence[0][2] == 2) == False:
+            return None
 
         seq_feat = np.where(seq_feat == None, self.feature_default_value, seq_feat)
         pos_feat = np.where(pos_feat == None, self.feature_default_value, pos_feat)
         neg_feat = np.where(neg_feat == None, self.feature_default_value, neg_feat)
-
+           
         return seq, pos, neg, token_type, next_token_type, next_action_type, seq_feat, pos_feat, neg_feat
 
     def __len__(self):
@@ -232,7 +237,6 @@ class MyDataset(torch.utils.data.Dataset):
             feat_default_value[feat_id] = np.zeros(
                 list(self.mm_emb_dict[feat_id].values())[0].shape[0], dtype=np.float32
             )
-
         return feat_default_value, feat_types, feat_statistics
 
     def fill_missing_feat(self, feat, item_id):
@@ -262,7 +266,7 @@ class MyDataset(torch.utils.data.Dataset):
             if item_id != 0 and self.indexer_i_rev[item_id] in self.mm_emb_dict[feat_id]:
                 if type(self.mm_emb_dict[feat_id][self.indexer_i_rev[item_id]]) == np.ndarray:
                     filled_feat[feat_id] = self.mm_emb_dict[feat_id][self.indexer_i_rev[item_id]]
-
+        
         return filled_feat
 
     @staticmethod
@@ -281,7 +285,22 @@ class MyDataset(torch.utils.data.Dataset):
             pos_feat: 正样本特征, list形式
             neg_feat: 负样本特征, list形式
         """
-        seq, pos, neg, token_type, next_token_type, next_action_type, seq_feat, pos_feat, neg_feat = zip(*batch)
+        valid_batch = [b for b in batch if b is not None]
+    
+        if not valid_batch:
+            # 返回空结构
+            return (
+                torch.empty(0, dtype=torch.int32), 
+                torch.empty(0, dtype=torch.int32), 
+                torch.empty(0, dtype=torch.int32), 
+                torch.empty(0, dtype=torch.int32), 
+                torch.empty(0, dtype=torch.int32), 
+                torch.empty(0, dtype=torch.int32), 
+                [], 
+                [], 
+                []
+            )
+        seq, pos, neg, token_type, next_token_type, next_action_type, seq_feat, pos_feat, neg_feat = zip(*valid_batch)
         seq = torch.from_numpy(np.array(seq))
         pos = torch.from_numpy(np.array(pos))
         neg = torch.from_numpy(np.array(neg))
@@ -447,11 +466,12 @@ def load_mm_emb(mm_path, feat_ids):
     Returns:
         mm_emb_dict: 多模态特征Embedding字典，key为特征ID，value为特征Embedding字典（key为item ID，value为Embedding）
     """
-    SHAPE_DICT = {"81": 32, "82": 1024, "83": 3584, "84": 4096, "85": 3584, "86": 3584}
+    SHAPE_DICT = {"81": 32, "82": 1024, "83": 3584, "84": 4096, "85": 3584, "86": 1024}
     mm_emb_dict = {}
     for feat_id in tqdm(feat_ids, desc='Loading mm_emb'):
         shape = SHAPE_DICT[feat_id]
         emb_dict = {}
+        print('Loading #{feat_id} mm_emb')
         if feat_id != '81':
             try:
                 base_path = Path(mm_path, f'emb_{feat_id}_{shape}')
@@ -471,4 +491,5 @@ def load_mm_emb(mm_path, feat_ids):
                 emb_dict = pickle.load(f)
         mm_emb_dict[feat_id] = emb_dict
         print(f'Loaded #{feat_id} mm_emb')
+    
     return mm_emb_dict
