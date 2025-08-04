@@ -93,36 +93,6 @@ def GAUC(pos_logits, pos_labels, neg_logits=None, neg_labels=None, next_token_ty
    
         user_aucs.append(user_auc)
     return torch.tensor(user_aucs).mean().item()
-
-def HitRate(pos_logits, neg_logits=None, next_token_type=None, next_action_type=None, topK=10):
-    """
-    计算HitRate
-    inputs:
-        pos_logits: 正样本预测分数 [B, pos_len]
-        neg_logits: 负样本预测分数 [B, neg_len]
-        next_token_type: token类型 [B, pos_len]
-        next_action_type: action类型 [B, pos_len], label
-        topK: topK
-    outputs:
-        HitRate
-    """
-    if neg_logits is not None:
-        logits = torch.cat([pos_logits, neg_logits], dim=-1)
-        next_token_type = torch.cat([next_token_type, torch.zeros_like(next_token_type)], dim=-1)
-        next_action_type = torch.cat([next_action_type, torch.zeros_like(next_action_type)], dim=-1)
-    else:
-        logits = pos_logits
-    
-   
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-    
-    sorted_next_token_type = next_token_type[sorted_indices]
-    sorted_next_action_type = next_action_type[sorted_indices]
-    
-    print(sorted_next_token_type.shape)
-    print(sorted_next_action_type.shape)
-    exit(0)
-    hit_mask = (sorted_next_token_type == 1) & (sorted_next_action_type == 1)
     
 
 def HitRate(pos_logits, neg_logits, next_token_type, next_action_type, topK=10):
